@@ -94,6 +94,7 @@ mutation.
 - **File:** `torchao/kernel/autotuner.py:103, 196–242`
 - **Category:** registry / cache
 - **Severity:** HIGH
+- **Status:** fixed — lazy init via `@functools.cache`, miss-path write + snapshot taken under `threading.Lock`, `_save_best_configs` pickles the snapshot
 - **What:** Module-level `BEST_CONFIGS = None`. `get_best_config_fn` does (a) lazy init via `if BEST_CONFIGS is None: BEST_CONFIGS = _load_best_configs(); if BEST_CONFIGS is None: BEST_CONFIGS = {}` (lines ~203–208), (b) miss-path `BEST_CONFIGS[key] = (best_config, best_time)` and `_save_best_configs(BEST_CONFIGS)` (lines ~238, ~241), with reader `get_best_config_by_key` (lines ~196–198). Called per int-mm shape from `torchao/kernel/intmm_triton.py:340, 367`.
 - **Why it's not safe:** Three independent unsafe patterns stacked: CLAUDE.md pattern #3 (lazy singleton), PYTHON_THREADSAFETY.md "check-then-act" (the miss-then-write), and "iteration under concurrent mutation" (`pickle.dump` walks the dict while writers may still be inserting).
 - **Repro hypothesis:** Threads A and B both call `int_matmul(...)` with new but identical shapes. Both observe `key not in BEST_CONFIGS`, both autotune (wasted work), both write `BEST_CONFIGS[key] = ...`, both invoke `_save_best_configs(BEST_CONFIGS)`. The second `pickle.dump` may iterate while the other thread mutates → undefined pickled output (no crash, but the saved file content is undefined).

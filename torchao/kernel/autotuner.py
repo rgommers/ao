@@ -6,6 +6,8 @@
 import logging
 import os
 import pathlib
+import threading
+from functools import cache
 
 import torch
 import triton
@@ -100,7 +102,18 @@ def do_bench_triton(
     return getattr(torch, return_mode)(times).item()
 
 
-BEST_CONFIGS = None
+# Guards writes to the cache dict returned by `_get_best_configs()` against
+# concurrent autotune misses under free-threaded CPython. Reads use single-key
+# dict semantics (atomic) so no lock is needed on the read path.
+_best_configs_lock = threading.Lock()
+
+
+@cache
+def _get_best_configs() -> dict:
+    """Load (or initialize) the autotune cache. `functools.cache` makes this
+    run exactly once across concurrent first-callers."""
+    loaded = _load_best_configs()
+    return loaded if loaded is not None else {}
 
 
 def _save_best_configs(best_configs):
@@ -194,18 +207,13 @@ def do_bench(fn, args, config, best_time=None):
 
 
 def get_best_config_by_key(key):
-    if key in BEST_CONFIGS:
-        return BEST_CONFIGS[key][0]
+    cache_dict = _get_best_configs()
+    if key in cache_dict:           # single-op dict read: FT-safe
+        return cache_dict[key][0]
 
 
 def get_best_config_fn(fn, args, configs):
-    global BEST_CONFIGS
-    if BEST_CONFIGS is None:
-        BEST_CONFIGS = _load_best_configs()
-
-    # This means no config file was loaded
-    if BEST_CONFIGS is None:
-        BEST_CONFIGS = {}
+    cache_dict = _get_best_configs()
 
     if len(configs) == 0:
         return None
@@ -217,7 +225,9 @@ def get_best_config_fn(fn, args, configs):
 
     logging.info(f"Starting autotune search. No config found for key {key}.")
 
-    # Search for the best config
+    # Two threads with the same key may both reach here and autotune in
+    # parallel — that wastes work but is correctness-preserving (last
+    # writer wins on the cache entry).
     best_config = configs[0]
     best_time = do_bench(fn, args, configs[0])
     logging.info(" ".join(map(str, [key, best_time, best_config])))
@@ -234,9 +244,12 @@ def get_best_config_fn(fn, args, configs):
             best_time = time
             best_config = config
         i += 1
-    # Also store time, so it can be proven that the config works
-    BEST_CONFIGS[key] = (best_config, best_time)
     logging.info("-- perfetto --")
     logging.info(" ".join(map(str, [best_time, best_config])))
-    _save_best_configs(BEST_CONFIGS)
+    # Snapshot under the lock so `_save_best_configs` (which iterates via
+    # pickle.dump) never sees a dict mid-mutation from another thread.
+    with _best_configs_lock:
+        cache_dict[key] = (best_config, best_time)
+        snapshot = dict(cache_dict)
+    _save_best_configs(snapshot)
     return best_config
