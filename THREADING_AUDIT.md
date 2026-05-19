@@ -62,6 +62,7 @@ mutation.
 - **File:** `torchao/csrc/cpu/shared_kernels/linear_8bit_act_xbit_weight/kernel_selector.h:414`
 - **Category:** native-cache
 - **Severity:** HIGH
+- **Status:** fixed — added `std::mutex` to `UKernelConfigRegistrationTable`; `register_ukernel_config` and `get_ukernel_config` now take a `std::lock_guard`
 - **What:** `select_ukernel_config()` owns a function-local `static UKernelConfigRegistrationTable table` whose backing `std::unordered_map registration_table_` (line ~39) is mutated on cache miss via `register_ukernel_config(...)` (line ~429), with concurrent readers via `table.get_ukernel_config(...)` (line ~423). No mutex / atomics. Called per linear op invocation from `op_linear_8bit_act_xbit_weight-impl.h` lines 76/130/193/293/345.
 - **Why it's not safe:** CLAUDE.md pattern #2/#3 ("shared mutable caches", "global registries on the hot path"). C++11 magic-static covers the *table* construction, but the stored `unordered_map` is mutated post-construction without synchronization.
 - **Repro hypothesis:** Two free-threaded Python threads run the same quantized linear with a not-yet-registered `PackedWeightsHeader`. Both fail the `has_value()` check at line ~423, both enter `register_ukernel_config`, both call `registration_table_[key] = config` concurrently. Rehash/insert race → torn map, possible duplicate-key throw, or use-after-rehash crash on the reader.
@@ -72,6 +73,7 @@ mutation.
 - **File:** `torchao/csrc/cpu/shared_kernels/groupwise_lowbit_weight_lut/kernel_selector.h:194`
 - **Category:** native-cache
 - **Severity:** HIGH
+- **Status:** fixed — same `std::mutex` treatment as F-01; doc comment updated from "thread-unsafe" to "thread-safe"
 - **What:** Same pattern as F-01: `select_ukernel_config<weight_nbit>()` owns a function-local `static UKernelConfigRegistrationTable table` whose internal `unordered_map` is mutated by `register_ukernel_config` (line ~210) and read at lines ~202/~212 with no synchronization. Called per op from `op_groupwise_lowbit_weight_lut-impl.h` lines 61/165/219.
 - **Why it's not safe:** Same as F-01 (CLAUDE.md pattern #2/#3).
 - **Repro hypothesis:** Two free-threaded Python threads execute the groupwise LUT linear op concurrently before any kernel has been registered for the active CPU; both reach `register_ukernel_config` and race the map insertion.
