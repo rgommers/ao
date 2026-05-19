@@ -180,6 +180,7 @@ mutation.
 - **File:** `torchao/kernel/blockwise_quantization.py:13–31`
 - **Category:** lazy-init
 - **Severity:** HIGH
+- **Status:** fixed — replaced bool-flag pattern with `@functools.cache`-wrapped builder returning an immutable `_BlockwiseFp8Impls` dataclass
 - **What:** Module-level `_triton_initialized = False`, `_blockwise_fp8_gemm_impl = None`, etc. `_lazy_init_triton()` sets `_triton_initialized = True` *before* assigning the kernel handles. Funneled through by every `fp8_blockwise_*` entry point (lines ~238, ~261, ~298, ~341).
 - **Why it's not safe:** CLAUDE.md pattern #4. Thread A enters `_lazy_init_triton`, sets the flag, then yields during `import triton` (a slow operation). Thread B sees flag=True, returns from `_lazy_init_triton` immediately, and calls `_blockwise_fp8_gemm_impl(...)` → `_blockwise_fp8_gemm_impl is None` → `TypeError: 'NoneType' object is not callable`.
 - **Repro hypothesis:** Two threads doing FP8-blockwise inference in parallel on a freshly-imported module. Thread A enters `_lazy_init_triton`, sets `_triton_initialized=True`, yields during the import. Thread B's call to `blockwise_fp8_gemm` reaches the dispatch line with `_blockwise_fp8_gemm_impl is None`.
@@ -190,6 +191,7 @@ mutation.
 - **File:** `torchao/kernel/bsr_triton_ops.py:449–461`
 - **Category:** lazy-init
 - **Severity:** HIGH
+- **Status:** fixed — replaced bool-flag pattern with `@functools.cache`-wrapped builder returning an immutable `_BsrTritonImpls` dataclass
 - **What:** Same shape as F-12: `_triton_initialized = False`, `_bsr_strided_addmm_kernel = None`, set flag before kernel build. Concurrent caller at line ~275 (`bsr_dense_addmm`) can see `_triton_initialized=True` but `_bsr_strided_addmm_kernel is None`.
 - **Why it's not safe:** Same as F-12.
 - **Repro hypothesis:** Same as F-12.
