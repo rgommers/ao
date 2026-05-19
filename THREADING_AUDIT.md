@@ -127,6 +127,7 @@ mutation.
 - **File:** `torchao/float8/fsdp_utils.py:85, 174, 229–246`
 - **Category:** subclass-state
 - **Severity:** HIGH
+- **Status:** fixed — `fsdp_pre_all_gather` now snapshots `self._precomputed_scale` into a local before the `is not None` check, eliminating the double-read TOCTOU
 - **What:** `precompute_float8_dynamic_scale_for_fsdp` writes `float8_linear.weight._local_tensor._precomputed_scale = local_scale_tensor[i]` on the FSDP local tensor that is the same `WeightWithDynamicFloat8CastTensor` instance subsequently used by forward in `fsdp_pre_all_gather` (reads `self._precomputed_scale`) and `__tensor_flatten__` (line ~212).
 - **Why it's not safe:** CLAUDE.md pattern #4 ("Lazy first-use state on shared Python objects"). Setting a Python instance attribute (`Optional[Tensor]`) while another thread reads it is a torn-attribute scenario under free-threading. The same tensor is also flattened/unflattened for state-dict ops; concurrent calls would interleave.
 - **Repro hypothesis:** Thread A enters `fsdp_pre_all_gather`, reads `self._precomputed_scale is not None` (truthy), thread B's `precompute_float8_dynamic_scale_for_fsdp` re-writes `self._precomputed_scale = local_scale_tensor[i]`, thread A then reads `self._precomputed_scale` and uses a different tensor than the one it checked.
