@@ -158,6 +158,7 @@ mutation.
 - **File:** `torchao/optim/subclass_4bit.py:34–41`
 - **Category:** cache
 - **Severity:** HIGH
+- **Status:** fixed — cached values now wrapped in `tuple(...)`
 - **What:** `@lru_cache(maxsize=1)` over functions returning a Python `list[float]` from `create_dynamic_map(...)` / `torch.linspace(...).tolist()`. The same list object is returned by reference to every caller. Used at `subclass_4bit.py:128` to build `torch.tensor(qmap_list, ...)`.
 - **Why it's not safe:** CLAUDE.md pattern #5 ("Shared caches whose exact runtime guarantees are unclear") + PYTHON_THREADSAFETY.md `list` rules. The `lru_cache` decorator is FT-safe in 3.13+, but the cached *value* is a mutable container shared by reference. `torch.tensor(qmap_list)` iterates the list; any concurrent caller that mutates the list (or any future code that does) → undefined iteration order.
 - **Repro hypothesis:** (static analysis only) Today's callers only read the list. The race surface exists for any future code path that does `qmap_list.append(...)` or returns it to user code that mutates.
@@ -168,6 +169,7 @@ mutation.
 - **File:** `torchao/optim/subclass_8bit.py:30–37`
 - **Category:** cache
 - **Severity:** HIGH
+- **Status:** fixed — cached values now wrapped in `tuple(...)`
 - **What:** Identical pattern to F-10; cached `list[float]` is shared across all `OptimState8bit.zeros()` calls.
 - **Why it's not safe:** Same as F-10.
 - **Repro hypothesis:** (static analysis only)
