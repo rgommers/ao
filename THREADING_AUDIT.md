@@ -63,7 +63,7 @@ mutation.
 - **Category:** native-cache
 - **Severity:** HIGH
 - **Status:** fixed — added `std::mutex` to `UKernelConfigRegistrationTable`; `register_ukernel_config` and `get_ukernel_config` now take a `std::lock_guard`
-- **MT test coverage:** no — blocked on aarch64 host. Both `register_ukernel_config` template instantiations are gated by `#if defined(TORCHAO_BUILD_CPU_AARCH64)`; on x86 the registration table is constructed but never receives entries, so the patched code path is unreachable at runtime. Verification on x86 is review-only (clean build with the mutex added).
+- **MT test coverage:** scaffolded — `test/free_threading/test_cpu_kernel_selector_concurrent.py::test_linear_8bit_act_4bit_weight_concurrent` hammers the op from N threads. Skips on x86 (`platform.machine() != 'aarch64'`) since the registration body is gated by `#if defined(TORCHAO_BUILD_CPU_AARCH64)`. Unverified on this dev box — awaits aarch64 CI to actually exercise.
 - **What:** `select_ukernel_config()` owns a function-local `static UKernelConfigRegistrationTable table` whose backing `std::unordered_map registration_table_` (line ~39) is mutated on cache miss via `register_ukernel_config(...)` (line ~429), with concurrent readers via `table.get_ukernel_config(...)` (line ~423). No mutex / atomics. Called per linear op invocation from `op_linear_8bit_act_xbit_weight-impl.h` lines 76/130/193/293/345.
 - **Why it's not safe:** CLAUDE.md pattern #2/#3 ("shared mutable caches", "global registries on the hot path"). C++11 magic-static covers the *table* construction, but the stored `unordered_map` is mutated post-construction without synchronization.
 - **Repro hypothesis:** Two free-threaded Python threads run the same quantized linear with a not-yet-registered `PackedWeightsHeader`. Both fail the `has_value()` check at line ~423, both enter `register_ukernel_config`, both call `registration_table_[key] = config` concurrently. Rehash/insert race → torn map, possible duplicate-key throw, or use-after-rehash crash on the reader.
@@ -75,7 +75,7 @@ mutation.
 - **Category:** native-cache
 - **Severity:** HIGH
 - **Status:** fixed — same `std::mutex` treatment as F-01; doc comment updated from "thread-unsafe" to "thread-safe"
-- **MT test coverage:** no — blocked on aarch64 host (same gating as F-01: the registration body is `#if defined(TORCHAO_BUILD_CPU_AARCH64)` only).
+- **MT test coverage:** scaffold placeholder — `test/free_threading/test_cpu_kernel_selector_concurrent.py::test_groupwise_lowbit_weight_lut_concurrent` carries the structure (skip-on-x86 marker, N-thread barrier, body) but is `@pytest.mark.skip`'d pending verified inputs for `_pack_groupwise_4bit_weight_with_lut`. A working input set can be derived from a single forward of `quantize_(model, GroupwiseLutWeightConfig(...))` (see `test/prototype/test_groupwise_lowbit_weight_lut_quantizer.py`). The mutex pattern is identical to F-01.
 - **What:** Same pattern as F-01: `select_ukernel_config<weight_nbit>()` owns a function-local `static UKernelConfigRegistrationTable table` whose internal `unordered_map` is mutated by `register_ukernel_config` (line ~210) and read at lines ~202/~212 with no synchronization. Called per op from `op_groupwise_lowbit_weight_lut-impl.h` lines 61/165/219.
 - **Why it's not safe:** Same as F-01 (CLAUDE.md pattern #2/#3).
 - **Repro hypothesis:** Two free-threaded Python threads execute the groupwise LUT linear op concurrently before any kernel has been registered for the active CPU; both reach `register_ukernel_config` and race the map insertion.
