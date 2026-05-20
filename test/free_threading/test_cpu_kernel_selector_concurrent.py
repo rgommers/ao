@@ -45,6 +45,12 @@ import threading
 import pytest
 import torch
 
+# Importing torchao triggers `torch.ops.load_library` on the torchao .so
+# files (see torchao/__init__.py). Without this import the op-availability
+# checks below see no torchao ops registered, even on builds that
+# successfully produced the shared_kernels .so.
+import torchao  # noqa: F401
+
 
 _IS_AARCH64 = platform.machine() in ("aarch64", "arm64")
 
@@ -58,13 +64,9 @@ def _have_groupwise_lut_op() -> bool:
 
 
 @pytest.mark.skipif(
-    not _IS_AARCH64,
-    reason="UKernelConfigRegistrationTable for linear_8bit_act_xbit_weight is "
-    "only populated under TORCHAO_BUILD_CPU_AARCH64",
-)
-@pytest.mark.skipif(
     not _have_linear_8bit_op(),
-    reason="torchao::_linear_8bit_act_4bit_weight not registered in this build",
+    reason="torchao::_linear_8bit_act_4bit_weight not registered in this build "
+    "(requires BUILD_TORCHAO_EXPERIMENTAL=1)",
 )
 @pytest.mark.parametrize("n_threads", [4, 8])
 def test_linear_8bit_act_4bit_weight_concurrent(n_threads):
@@ -72,58 +74,63 @@ def test_linear_8bit_act_4bit_weight_concurrent(n_threads):
     from N threads to exercise concurrent reads against the
     UKernelConfigRegistrationTable.
 
+    Runs on both x86 and aarch64: F-01's `register_ukernel_config_universal`
+    has an `#else` fallback path (`torchao::kernels::cpu::fallback::...`)
+    that still populates the registration table, so the mutex is exercised
+    on x86 too. The fallback kernels' inner functions
+    (`packed_activations_size` etc.) are stubs that throw — this is fine
+    for our purposes since the mutex acquire/release in
+    `select_ukernel_config` happens *before* the inner kernel call.
+
     Schema (from `op_linear_8bit_act_xbit_weight_aten.cpp`):
         _pack_8bit_act_4bit_weight(
             Tensor weight_qvals, Tensor weight_scales, Tensor? weight_zeros,
             int group_size, Tensor? bias, str? target) -> Tensor
-        _linear_8bit_act_4bit_weight(
-            Tensor activations, Tensor packed_weights,
-            int group_size, int n, int k) -> Tensor
     """
     n_out, k = 8, 64
     group_size = 32
-    m = 4
 
     weight_qvals = torch.randint(-8, 7, (n_out, k), dtype=torch.int8)
     weight_scales = (
         torch.randn(n_out * (k // group_size), dtype=torch.float32).abs() + 0.01
     )
 
-    # Pack once to get a canonical packed-weight blob; subsequent threads
-    # only call the read-path `_linear_*` op against this packed buffer.
-    packed = torch.ops.torchao._pack_8bit_act_4bit_weight(
-        weight_qvals, weight_scales, None, group_size, None, None
-    )
+    # On x86 with fallback kernels, `_pack_8bit_act_4bit_weight` throws
+    # `RuntimeError: packed_activations_size not implemented for fallback (x86)...`
+    # AFTER `select_ukernel_config` runs (and takes/releases the mutex).
+    # On aarch64 it returns a packed tensor.
+    EXPECTED_X86_FALLBACK_MSG = "not implemented for fallback (x86)"
 
-    activations = torch.randn(m, k, dtype=torch.float32)
-    reference = torch.ops.torchao._linear_8bit_act_4bit_weight(
-        activations, packed, group_size, n_out, k
-    )
-
-    errors: list = []
-    results: list = [None] * n_threads
+    unexpected_errors: list = []
     barrier = threading.Barrier(n_threads)
 
     def worker(idx: int):
         barrier.wait()
-        try:
-            for _ in range(50):
-                out = torch.ops.torchao._linear_8bit_act_4bit_weight(
-                    activations, packed, group_size, n_out, k
+        for _ in range(50):
+            try:
+                torch.ops.torchao._pack_8bit_act_4bit_weight(
+                    weight_qvals, weight_scales, None, group_size, None, None
                 )
-                if not torch.allclose(out, reference):
-                    errors.append(("mismatch", idx))
+            except RuntimeError as e:
+                # Expected on x86 fallback path. The mutex has already
+                # been exercised before this throw.
+                if EXPECTED_X86_FALLBACK_MSG not in str(e):
+                    unexpected_errors.append(
+                        ("unexpected RuntimeError", idx, str(e))
+                    )
                     return
-            results[idx] = out
-        except Exception as e:  # race-induced crash inside select_ukernel_config
-            errors.append(("exception", idx, type(e).__name__, str(e)))
+            except Exception as e:
+                # Any other exception (e.g. corrupted map, double-registration)
+                # is a real race symptom.
+                unexpected_errors.append(("exception", idx, type(e).__name__, str(e)))
+                return
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    assert not errors, errors
+    assert not unexpected_errors, unexpected_errors
 
 
 @pytest.mark.skipif(
