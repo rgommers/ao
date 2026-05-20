@@ -63,6 +63,7 @@ mutation.
 - **Category:** native-cache
 - **Severity:** HIGH
 - **Status:** fixed — added `std::mutex` to `UKernelConfigRegistrationTable`; `register_ukernel_config` and `get_ukernel_config` now take a `std::lock_guard`
+- **MT test coverage:** no — blocked on aarch64 host. Both `register_ukernel_config` template instantiations are gated by `#if defined(TORCHAO_BUILD_CPU_AARCH64)`; on x86 the registration table is constructed but never receives entries, so the patched code path is unreachable at runtime. Verification on x86 is review-only (clean build with the mutex added).
 - **What:** `select_ukernel_config()` owns a function-local `static UKernelConfigRegistrationTable table` whose backing `std::unordered_map registration_table_` (line ~39) is mutated on cache miss via `register_ukernel_config(...)` (line ~429), with concurrent readers via `table.get_ukernel_config(...)` (line ~423). No mutex / atomics. Called per linear op invocation from `op_linear_8bit_act_xbit_weight-impl.h` lines 76/130/193/293/345.
 - **Why it's not safe:** CLAUDE.md pattern #2/#3 ("shared mutable caches", "global registries on the hot path"). C++11 magic-static covers the *table* construction, but the stored `unordered_map` is mutated post-construction without synchronization.
 - **Repro hypothesis:** Two free-threaded Python threads run the same quantized linear with a not-yet-registered `PackedWeightsHeader`. Both fail the `has_value()` check at line ~423, both enter `register_ukernel_config`, both call `registration_table_[key] = config` concurrently. Rehash/insert race → torn map, possible duplicate-key throw, or use-after-rehash crash on the reader.
@@ -74,6 +75,7 @@ mutation.
 - **Category:** native-cache
 - **Severity:** HIGH
 - **Status:** fixed — same `std::mutex` treatment as F-01; doc comment updated from "thread-unsafe" to "thread-safe"
+- **MT test coverage:** no — blocked on aarch64 host (same gating as F-01: the registration body is `#if defined(TORCHAO_BUILD_CPU_AARCH64)` only).
 - **What:** Same pattern as F-01: `select_ukernel_config<weight_nbit>()` owns a function-local `static UKernelConfigRegistrationTable table` whose internal `unordered_map` is mutated by `register_ukernel_config` (line ~210) and read at lines ~202/~212 with no synchronization. Called per op from `op_groupwise_lowbit_weight_lut-impl.h` lines 61/165/219.
 - **Why it's not safe:** Same as F-01 (CLAUDE.md pattern #2/#3).
 - **Repro hypothesis:** Two free-threaded Python threads execute the groupwise LUT linear op concurrently before any kernel has been registered for the active CPU; both reach `register_ukernel_config` and race the map insertion.
@@ -97,6 +99,7 @@ mutation.
 - **Category:** registry / cache
 - **Severity:** HIGH
 - **Status:** fixed — lazy init via `@functools.cache`, miss-path write + snapshot taken under `threading.Lock`, `_save_best_configs` pickles the snapshot
+- **MT test coverage:** no — blocked on Triton free-threading support. The only realistic caller is the Triton autotune path via `int_matmul` in `torchao/kernel/intmm_triton.py`; running it under FT would surface Triton's own well-known FT races and obscure any signal on this fix. The lock+snapshot mechanism itself is a textbook pattern; revisit once upstream Triton declares FT-safe.
 - **What:** Module-level `BEST_CONFIGS = None`. `get_best_config_fn` does (a) lazy init via `if BEST_CONFIGS is None: BEST_CONFIGS = _load_best_configs(); if BEST_CONFIGS is None: BEST_CONFIGS = {}` (lines ~203–208), (b) miss-path `BEST_CONFIGS[key] = (best_config, best_time)` and `_save_best_configs(BEST_CONFIGS)` (lines ~238, ~241), with reader `get_best_config_by_key` (lines ~196–198). Called per int-mm shape from `torchao/kernel/intmm_triton.py:340, 367`.
 - **Why it's not safe:** Three independent unsafe patterns stacked: CLAUDE.md pattern #3 (lazy singleton), PYTHON_THREADSAFETY.md "check-then-act" (the miss-then-write), and "iteration under concurrent mutation" (`pickle.dump` walks the dict while writers may still be inserting).
 - **Repro hypothesis:** Threads A and B both call `int_matmul(...)` with new but identical shapes. Both observe `key not in BEST_CONFIGS`, both autotune (wasted work), both write `BEST_CONFIGS[key] = ...`, both invoke `_save_best_configs(BEST_CONFIGS)`. The second `pickle.dump` may iterate while the other thread mutates → undefined pickled output (no crash, but the saved file content is undefined).
@@ -130,6 +133,7 @@ mutation.
 - **Category:** subclass-state
 - **Severity:** HIGH
 - **Status:** fixed — `fsdp_pre_all_gather` now snapshots `self._precomputed_scale` into a local before the `is not None` check, eliminating the double-read TOCTOU
+- **MT test coverage:** yes — `test/free_threading/test_fsdp_precomputed_scale_concurrent.py::test_concurrent_precomputed_scale_write_and_pre_all_gather`. Reproduced the pre-fix `TypeError: 'Tensor' and 'NoneType'` by temporarily reverting the snapshot; test caught it on 6/6 parametrizations.
 - **What:** `precompute_float8_dynamic_scale_for_fsdp` writes `float8_linear.weight._local_tensor._precomputed_scale = local_scale_tensor[i]` on the FSDP local tensor that is the same `WeightWithDynamicFloat8CastTensor` instance subsequently used by forward in `fsdp_pre_all_gather` (reads `self._precomputed_scale`) and `__tensor_flatten__` (line ~212).
 - **Why it's not safe:** CLAUDE.md pattern #4 ("Lazy first-use state on shared Python objects"). Setting a Python instance attribute (`Optional[Tensor]`) while another thread reads it is a torn-attribute scenario under free-threading. The same tensor is also flattened/unflattened for state-dict ops; concurrent calls would interleave.
 - **Repro hypothesis:** Thread A enters `fsdp_pre_all_gather`, reads `self._precomputed_scale is not None` (truthy), thread B's `precompute_float8_dynamic_scale_for_fsdp` re-writes `self._precomputed_scale = local_scale_tensor[i]`, thread A then reads `self._precomputed_scale` and uses a different tensor than the one it checked.
@@ -163,6 +167,7 @@ mutation.
 - **Category:** cache
 - **Severity:** HIGH
 - **Status:** fixed — cached values now wrapped in `tuple(...)`
+- **MT test coverage:** yes — `test/free_threading/test_optim_qmap_concurrent.py` (`test_qmap_getter_returns_tuple[signed_4bit|unsigned_4bit]` for the isinstance regression guard, `test_concurrent_zeros_no_qmap_corruption[4bit-*]` for 16-thread × 50-iter stress).
 - **What:** `@lru_cache(maxsize=1)` over functions returning a Python `list[float]` from `create_dynamic_map(...)` / `torch.linspace(...).tolist()`. The same list object is returned by reference to every caller. Used at `subclass_4bit.py:128` to build `torch.tensor(qmap_list, ...)`.
 - **Why it's not safe:** CLAUDE.md pattern #5 ("Shared caches whose exact runtime guarantees are unclear") + PYTHON_THREADSAFETY.md `list` rules. The `lru_cache` decorator is FT-safe in 3.13+, but the cached *value* is a mutable container shared by reference. `torch.tensor(qmap_list)` iterates the list; any concurrent caller that mutates the list (or any future code that does) → undefined iteration order.
 - **Repro hypothesis:** (static analysis only) Today's callers only read the list. The race surface exists for any future code path that does `qmap_list.append(...)` or returns it to user code that mutates.
@@ -174,6 +179,7 @@ mutation.
 - **Category:** cache
 - **Severity:** HIGH
 - **Status:** fixed — cached values now wrapped in `tuple(...)`
+- **MT test coverage:** yes — same file as F-10; parametrizations `test_qmap_getter_returns_tuple[signed_8bit|unsigned_8bit]` and `test_concurrent_zeros_no_qmap_corruption[8bit-*]`.
 - **What:** Identical pattern to F-10; cached `list[float]` is shared across all `OptimState8bit.zeros()` calls.
 - **Why it's not safe:** Same as F-10.
 - **Repro hypothesis:** (static analysis only)
@@ -185,6 +191,7 @@ mutation.
 - **Category:** lazy-init
 - **Severity:** HIGH
 - **Status:** fixed — replaced bool-flag pattern with `@functools.cache`-wrapped builder returning an immutable `_BlockwiseFp8Impls` dataclass
+- **MT test coverage:** no — blocked on Triton free-threading support. The cached values *are* Triton kernel handles; exercising the patched path means actually running Triton kernels concurrently, which surfaces Triton's own FT races. The fix is validated by `functools.cache`'s documented FT semantics (CPython 3.13+ runs the body exactly once across concurrent first-callers).
 - **What:** Module-level `_triton_initialized = False`, `_blockwise_fp8_gemm_impl = None`, etc. `_lazy_init_triton()` sets `_triton_initialized = True` *before* assigning the kernel handles. Funneled through by every `fp8_blockwise_*` entry point (lines ~238, ~261, ~298, ~341).
 - **Why it's not safe:** CLAUDE.md pattern #4. Thread A enters `_lazy_init_triton`, sets the flag, then yields during `import triton` (a slow operation). Thread B sees flag=True, returns from `_lazy_init_triton` immediately, and calls `_blockwise_fp8_gemm_impl(...)` → `_blockwise_fp8_gemm_impl is None` → `TypeError: 'NoneType' object is not callable`.
 - **Repro hypothesis:** Two threads doing FP8-blockwise inference in parallel on a freshly-imported module. Thread A enters `_lazy_init_triton`, sets `_triton_initialized=True`, yields during the import. Thread B's call to `blockwise_fp8_gemm` reaches the dispatch line with `_blockwise_fp8_gemm_impl is None`.
@@ -196,6 +203,7 @@ mutation.
 - **Category:** lazy-init
 - **Severity:** HIGH
 - **Status:** fixed — replaced bool-flag pattern with `@functools.cache`-wrapped builder returning an immutable `_BsrTritonImpls` dataclass
+- **MT test coverage:** no — same blocker as F-12: Triton free-threading support.
 - **What:** Same shape as F-12: `_triton_initialized = False`, `_bsr_strided_addmm_kernel = None`, set flag before kernel build. Concurrent caller at line ~275 (`bsr_dense_addmm`) can see `_triton_initialized=True` but `_bsr_strided_addmm_kernel is None`.
 - **Why it's not safe:** Same as F-12.
 - **Repro hypothesis:** Same as F-12.
