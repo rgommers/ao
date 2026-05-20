@@ -56,9 +56,13 @@ struct UKernelConfigRegistrationTable {
     auto header = format.to_packed_weights_header();
     auto key = make_key(header, uarch);
     std::lock_guard<std::mutex> guard(mu_);
+    // Idempotent: first registration wins. Concurrent callers of
+    // `select_ukernel_config` may both observe a missing entry (each holds
+    // the lock independently for its `get_ukernel_config` call) and both
+    // attempt to register. Throwing on duplicate would be a TOCTOU false
+    // positive in that case.
     if (registration_table_.find(key) != registration_table_.end()) {
-      throw std::runtime_error(
-          "UKernelConfig is already registered for this format");
+      return;
     }
     config.validate();
     registration_table_[key] = config;

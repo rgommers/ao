@@ -53,9 +53,10 @@ struct UKernelConfigRegistrationTable {
     auto header = format.to_packed_weights_header();
     auto key = make_key(header, uarch);
     std::lock_guard<std::mutex> guard(mu_);
+    // Idempotent: first registration wins. See F-01 (sibling file) for the
+    // concurrent-caller TOCTOU rationale; the same applies here.
     if (registration_table_.find(key) != registration_table_.end()) {
-      throw std::runtime_error(
-          "UKernelConfig is already registered for this format");
+      return;
     }
     config.validate();
     registration_table_[key] = config;
