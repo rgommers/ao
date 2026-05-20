@@ -18,20 +18,21 @@ function(target_link_torchao_parallel_backend target_name torchao_parallel_backe
 
         target_compile_definitions(${target_name} PRIVATE TORCHAO_PARALLEL_ATEN=1 AT_PARALLEL_OPENMP=1 INTRA_OP_PARALLEL=1)
 
-        if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
-            set(_TORCH_LIBDIR "${TORCH_INSTALL_PREFIX}/lib")
-            find_library(_TORCH_OMP_RUNTIME
-                NAMES
-                gomp libgomp.so.1 libgomp.so
-                omp  libomp.so.1  libomp.so
-                HINTS "${_TORCH_LIBDIR}"
-                NO_DEFAULT_PATH
-            )
-            if(_TORCH_OMP_RUNTIME)
-                target_link_libraries(${target_name} PRIVATE "${_TORCH_OMP_RUNTIME}")
-            else()
-                target_link_libraries(${target_name} PRIVATE ${TORCH_INSTALL_PREFIX}/lib/libomp${CMAKE_SHARED_LIBRARY_SUFFIX})
-            endif()
+        # Search torch's bundled lib dir for whichever OMP runtime the torch
+        # wheel actually ships. CUDA wheels and the macOS / aarch64 wheels
+        # ship libomp; the Linux x86 CPU wheel ships libgomp.so.1. The old
+        # code hard-coded libomp on non-aarch64 and failed against the
+        # Linux x86 CPU wheel.
+        set(_TORCH_LIBDIR "${TORCH_INSTALL_PREFIX}/lib")
+        find_library(_TORCH_OMP_RUNTIME
+            NAMES
+            gomp libgomp.so.1 libgomp.so
+            omp  libomp.so.1  libomp.so
+            HINTS "${_TORCH_LIBDIR}"
+            NO_DEFAULT_PATH
+        )
+        if(_TORCH_OMP_RUNTIME)
+            target_link_libraries(${target_name} PRIVATE "${_TORCH_OMP_RUNTIME}")
         else()
             target_link_libraries(${target_name} PRIVATE ${TORCH_INSTALL_PREFIX}/lib/libomp${CMAKE_SHARED_LIBRARY_SUFFIX})
         endif()

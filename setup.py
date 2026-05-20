@@ -802,8 +802,12 @@ def get_extensions():
     }
 
     if not IS_WINDOWS:
+        # NOTE: -std=c++20 must be added by us — PyTorch's CppExtension
+        # auto-appends -std=c++17 which would otherwise override the
+        # nvcc/rocm c++20 default and break std::unordered_map::contains,
+        # std::ranges, etc. in the aten_kernels sources.
         extra_compile_args["cxx"].extend(
-            ["-O3" if not debug_mode else "-O0", "-fdiagnostics-color=always"]
+            ["-O3" if not debug_mode else "-O0", "-fdiagnostics-color=always", "-std=c++20"]
         )
 
         # X86-specific compile flags
@@ -1085,9 +1089,13 @@ def get_extensions():
     if build_macos_arm_auto or os.getenv("BUILD_TORCHAO_EXPERIMENTAL") == "1":
         build_options = BuildOptions()
 
-        from distutils.sysconfig import get_python_lib
-
-        torch_dir = get_python_lib() + "/torch/share/cmake/Torch"
+        # Resolve Torch's cmake dir via torch itself rather than
+        # distutils.sysconfig.get_python_lib(): on free-threaded Python
+        # (cp314t) get_python_lib() returns ".../lib/python3.14/..."
+        # without the "t" suffix, pointing at a directory that does not
+        # exist. `torch.utils.cmake_prefix_path` is the official accessor
+        # and is correct on both with-GIL and free-threaded builds.
+        torch_dir = torch.utils.cmake_prefix_path + "/Torch"
 
         ext_modules.append(
             CMakeExtension(
