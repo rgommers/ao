@@ -2,7 +2,7 @@
 authors = ["Ralf Gommers <ralf.gommers@gmail.com>"]
 channels = ["conda-forge"]
 name = "torchao"
-platforms = ["linux-64"]
+platforms = ["linux-64", "linux-aarch64"]
 version = "0.1.0"
 
 [tasks]
@@ -51,9 +51,31 @@ description = "Build torchao in editable mode for CUDA"
 env = { CC = "$CC", CXX = "$CXX", CMAKE_KEEP_TEMP_FILES="1", CUDA_PATH="$CONDA_PREFIX", CUDA_HOME="$CONDA_PREFIX", CMAKE_CUDA_COMPILER="$CONDA_PREFIX/bin/nvcc", TORCH_CUDA_ARCH_LIST="8.0", MAX_JOBS="12", NVCC_APPEND_FLAGS="-diag-suppress 2908 -Xcompiler -Wno-deprecated-declarations"}
 
 
+# CPU-only feature, used for free-threading CI on aarch64 (and as a
+# CPU-only x86 development fallback). PyTorch CPU wheels are pulled from
+# the PyTorch index URL since the default PyPI index does not carry CPU-only
+# variants for cp314t.
+[feature.cpu]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.cpu.pypi-options]
+extra-index-urls = ["https://download.pytorch.org/whl/cpu"]
+
+[feature.cpu.pypi-dependencies]
+torch = ">=2.11.0, <2.12.0"
+
+[feature.cpu.tasks.build-cpu]
+cmd = "python -m pip install -e . -v --no-build-isolation --no-deps"
+description = "Build torchao in editable mode (CPU only). On aarch64 CI, set TORCHAO_BUILD_CPU_AARCH64=1 etc. via the workflow's env: block."
+env = { MAX_JOBS = "4" }
+
+
 [environments]
 default = ["cuda"]
 nogil = ["cuda", "free-threading"]
+# CI environment for free-threading on CPU (no CUDA). Used by
+# .github/workflows/free_threading_aarch64_cpu.yml.
+nogil-cpu = ["cpu", "free-threading"]
 
 [pypi-dependencies]
 parameterized = ">=0.9.0, <0.10"
