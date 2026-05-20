@@ -1,0 +1,85 @@
+name: Free-threading CPU CI (aarch64)
+
+# Runs the free-threading regression tests in test/free_threading/ on a
+# Python 3.14t (free-threaded) interpreter against a CPU build of torchao.
+#
+# Scope is deliberately narrow: a fast smoke check that the build works,
+# followed by the multi-threaded regression tests. The full test suite is
+# *not* run here — it's exercised by the existing aarch64 / CUDA / Metal
+# workflows.
+#
+# This workflow uses GitHub's free Linux aarch64 runner (ubuntu-24.04-arm),
+# available on public repos. If running on a self-hosted PyTorch infra
+# runner, swap the `runs-on` value for `linux.arm64.2xlarge` (matching
+# `regression_test_aarch64.yml`).
+
+on:
+  push:
+    branches:
+      - thread-safety-audit
+      - main
+  pull_request:
+    branches:
+      - main
+      - thread-safety-audit
+    paths:
+      - 'torchao/**'
+      - 'test/free_threading/**'
+      - 'pixi.toml'
+      - 'pixi.lock'
+      - '.github/workflows/free_threading_aarch64_cpu.yml'
+  workflow_dispatch:
+
+jobs:
+  free-threading-aarch64-cpu:
+    name: Free-threading CPU tests (aarch64, 3.14t)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    env:
+      # Force-keep the GIL disabled even if a transitively-imported module
+      # (e.g. triton, if it sneaks in) declares it can't run without it.
+      PYTHON_GIL: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@v0.8.10
+        with:
+          environments: nogil-cpu
+          # Cache the pixi environment between runs. The cache key is
+          # derived from pixi.lock so it invalidates when deps change.
+          cache: true
+
+      - name: Print interpreter / torch info
+        run: |
+          pixi run -e nogil-cpu python -VV
+          pixi run -e nogil-cpu python -c "import sys, sysconfig; print('free-threaded build:', sysconfig.get_config_var('Py_GIL_DISABLED')); print('GIL enabled at startup:', sys._is_gil_enabled())"
+          pixi run -e nogil-cpu python -c "import torch; print('torch:', torch.__version__); print('CUDA available:', torch.cuda.is_available())"
+
+      - name: Build torchao (free-threaded, CPU aarch64)
+        env:
+          BUILD_TORCHAO_EXPERIMENTAL: "1"
+          TORCHAO_BUILD_CPU_AARCH64: "1"
+          TORCHAO_ENABLE_ARM_NEON_DOT: "1"
+          TORCHAO_PARALLEL_BACKEND: "OPENMP"
+        run: pixi run -e nogil-cpu build-cpu
+
+      - name: Quick sanity — torchao imports and ops are registered
+        run: |
+          pixi run -e nogil-cpu pytest test/test_lean_import.py -v
+          pixi run -e nogil-cpu python -c "
+          import torch, torchao
+          print('torchao version:', torchao.__version__)
+          # F-01 / F-02 op registration: confirms the aarch64 kernels were
+          # built in. If False, the build flags above need adjusting.
+          print('_linear_8bit_act_4bit_weight registered:',
+                hasattr(torch.ops.torchao, '_linear_8bit_act_4bit_weight'))
+          print('_linear_groupwise_4bit_weight_with_lut registered:',
+                hasattr(torch.ops.torchao, '_linear_groupwise_4bit_weight_with_lut'))
+          "
+
+      - name: Free-threading regression tests (test/free_threading/)
+        run: pixi run -e nogil-cpu pytest test/free_threading/ -v --tb=short
