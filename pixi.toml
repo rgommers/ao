@@ -1,0 +1,72 @@
+[workspace]
+authors = ["Ralf Gommers <ralf.gommers@gmail.com>"]
+channels = ["conda-forge"]
+name = "torchao"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+ninja = ">=1.13.2,<2"
+cmake = "<4"
+cxx-compiler = ">=1.11.0,<2"
+setuptools = ">=76.0.0,<82"
+wheel = ">=0.47.0,<0.48"
+ccache = ">=4.13.6,<5"
+pip = ">=26.1.1,<27"
+pytest = "==9.0.3"
+numpy = ">=2.4.6,<3"
+
+
+[feature.cuda]
+platforms = ["linux-64"]
+system-requirements = { cuda = "13" }
+
+[feature.cuda.dependencies]
+cuda-compiler = "*"
+cuda-libraries-dev = "*"
+cuda-version = "13.0.*"
+
+[feature.cuda.pypi-dependencies]
+# 2.12.0 was just released, seems to give a build error in a .cu file
+torch = { version = ">=2.11.0, <2.12.0" }
+
+[feature.cuda.tasks.build]
+cmd ="python -m pip install -e . -v --no-build-isolation --no-deps"
+description = "Build torchao in editable mode for CUDA"
+env = { CC = "$CC", CXX = "$CXX", CMAKE_KEEP_TEMP_FILES="1", CUDA_PATH="$CONDA_PREFIX", CUDA_HOME="$CONDA_PREFIX", CMAKE_CUDA_COMPILER="$CONDA_PREFIX/bin/nvcc", TORCH_CUDA_ARCH_LIST="8.0", MAX_JOBS="12", NVCC_APPEND_FLAGS="-diag-suppress 2908 -Xcompiler -Wno-deprecated-declarations"}
+#env = { CC = "ccache $CC", CXX = "ccache $CXX", nvcc="ccache nvcc", CMAKE_KEEP_TEMP_FILES="1", CUDA_PATH="$CONDA_PREFIX", CUDA_HOME="$CONDA_PREFIX", CMAKE_CUDA_COMPILER="$CONDA_PREFIX/bin/nvcc", TORCH_CUDA_ARCH_LIST="8.0", MAX_JOBS="12" }
+
+[feature.cuda.activation]
+scripts = ["./activate-cuda.sh"]
+
+
+[feature.free-threading.dependencies]
+python-freethreading = ">=3.14.0,<3.15.0"
+
+[feature.free-threading.tasks.build-nogil]
+cmd ="python -m pip install -e . -v --no-build-isolation --no-deps"
+description = "Build torchao in editable mode for CUDA"
+env = { CC = "$CC", CXX = "$CXX", CMAKE_KEEP_TEMP_FILES="1", CUDA_PATH="$CONDA_PREFIX", CUDA_HOME="$CONDA_PREFIX", CMAKE_CUDA_COMPILER="$CONDA_PREFIX/bin/nvcc", TORCH_CUDA_ARCH_LIST="8.0", MAX_JOBS="12", NVCC_APPEND_FLAGS="-diag-suppress 2908 -Xcompiler -Wno-deprecated-declarations"}
+
+
+[environments]
+default = ["cuda"]
+nogil = ["cuda", "free-threading"]
+
+[pypi-dependencies]
+parameterized = ">=0.9.0, <0.10"
+packaging = "*"
+transformers = ">=5.8.1, <6"
+hypothesis = ">=6.152.9, <7"
+sentencepiece = ">=0.2.1, <0.3"
+expecttest = ">=0.3.0, <0.4"
+pyyaml = ">=6.0.3, <7"
+fire = ">=0.7.1, <0.8"
+tabulate = ">=0.10.0, <0.11"
+matplotlib = ">=3.10.9, <4"
+pandas = ">=3.0.3, <4"
+tiktoken = ">=0.13.0, <0.14"
+tqdm = ">=4.67.3, <5"
+importlib-metadata = ">=9.0.0, <10"
